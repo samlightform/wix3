@@ -82,6 +82,31 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam)
     return fContinueWindowsInProcess;
 }
 
+static bool IsProcessRunning(__in_z LPCWSTR wzApplication)
+{
+    HRESULT hr             = S_OK;
+    DWORD   *prgProcessIds = NULL;
+    DWORD   cProcessIds    = 0;
+    bool    isRunning      = false;
+
+    do
+    {
+        hr = ProcFindAllIdsFromExeName(wzApplication, &prgProcessIds, &cProcessIds);
+        if (SUCCEEDED(hr))
+        {
+            isRunning = cProcessIds > 0;
+            break;
+        }
+
+        ReleaseNullMem(prgProcessIds);
+        cProcessIds = 0;
+    }
+    while (S_FALSE == hr);
+
+    ReleaseMem(prgProcessIds);
+    return isRunning;
+}
+
 /******************************************************************
  PromptToContinue - displays the prompt if the application is still
   running.
@@ -109,18 +134,14 @@ static HRESULT PromptToContinue(
         hr = ProcFindAllIdsFromExeName(wzApplication, &prgProcessIds, &cProcessIds);
         if (SUCCEEDED(hr) && 0 < cProcessIds)
         {
-            er = WcaProcessMessage(static_cast<INSTALLMESSAGE>(INSTALLMESSAGE_WARNING | MB_ABORTRETRYIGNORE | MB_DEFBUTTON3 | MB_ICONWARNING), hRecMessage);
-            if (IDABORT == er)
+            er = WcaProcessMessage(static_cast<INSTALLMESSAGE>(INSTALLMESSAGE_WARNING | MB_RETRYCANCEL | MB_DEFBUTTON3 | MB_ICONWARNING), hRecMessage);
+            if (IDCANCEL == er)
             {
                 hr = HRESULT_FROM_WIN32(ERROR_INSTALL_USEREXIT);
             }
             else if (IDRETRY == er)
             {
                 hr = S_FALSE;
-            }
-            else if (IDIGNORE == er)
-            {
-                hr = S_OK;
             }
             else
             {
@@ -345,7 +366,34 @@ extern "C" UINT __stdcall WixCloseApplications(
         }
         ExitOnFailure(hr, "failed to get timeout from WixCloseApplication table");
 
-        // Before trying any changes to the machine, prompt if requested.
+        //
+        // send WM_CLOSE or WM_QUERYENDSESSION to currently running applications
+        //
+        bool sentMessage = false;
+        if (dwAttributes & CLOSEAPP_ATTRIBUTE_CLOSEMESSAGE)
+        {
+            SendApplicationMessage(pwzTarget, WM_CLOSE, dwTimeout);
+            sentMessage = true;
+        }
+
+        if (dwAttributes & CLOSEAPP_ATTRIBUTE_ENDSESSIONMESSAGE)
+        {
+            SendApplicationMessage(pwzTarget, WM_QUERYENDSESSION, dwTimeout);
+            sentMessage = true;
+        }
+
+        // Not great: wait a bit for the app to close before prompting
+        if (sentMessage)
+        {
+            int retries = 5;
+            while (IsProcessRunning(pwzTarget) && retries > 0)
+            {
+                Sleep(1000);
+                retries--;
+            }
+        }
+
+        // Prompt if app is still running
         if (dwAttributes & CLOSEAPP_ATTRIBUTE_PROMPTTOCONTINUE)
         {
             hr = PromptToContinue(pwzTarget, pwzDescription ? pwzDescription : L"");
@@ -355,19 +403,6 @@ extern "C" UINT __stdcall WixCloseApplications(
                 ExitFunction();
             }
             ExitOnFailure(hr, "Failure while prompting user to continue to close application.");
-        }
-
-        //
-        // send WM_CLOSE or WM_QUERYENDSESSION to currently running applications
-        //
-        if (dwAttributes & CLOSEAPP_ATTRIBUTE_CLOSEMESSAGE)
-        {
-            SendApplicationMessage(pwzTarget, WM_CLOSE, dwTimeout);
-        }
-
-        if (dwAttributes & CLOSEAPP_ATTRIBUTE_ENDSESSIONMESSAGE)
-        {
-            SendApplicationMessage(pwzTarget, WM_QUERYENDSESSION, dwTimeout);
         }
 
         //
